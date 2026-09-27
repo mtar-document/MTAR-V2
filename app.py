@@ -15,6 +15,7 @@ from models import (
     validate_job,
 )
 from report_builder import MOLD_DESCRIPTIONS, create_report
+from prolab_parser import apply_prolab_results, parse_prolab_pdf, suggested_mapping
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -37,7 +38,7 @@ st.markdown(
 )
 
 st.markdown('<h1 class="main-header">MTAR V2 — Mold Assessment Report</h1>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Sprint RG-1: one structured job record, one source of truth</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Sprint RG-2: structured PRO-LAB import with consultant review</p>', unsafe_allow_html=True)
 
 if "job" not in st.session_state:
     st.session_state.job = new_job_state()
@@ -48,7 +49,7 @@ job = st.session_state.job
 def reset_job():
     st.session_state.job = new_job_state()
     for key in list(st.session_state.keys()):
-        if key.startswith("photo_") or key == "lab_pdf":
+        if key.startswith("photo_") or key.startswith("prolab_") or key == "lab_pdf":
             del st.session_state[key]
     st.rerun()
 
@@ -251,8 +252,100 @@ with tab3:
 
 with tab4:
     st.markdown('<p class="section-header">PRO-LAB PDF</p>', unsafe_allow_html=True)
-    st.file_uploader("PRO-LAB Certificate of Mold Analysis (PDF) *", type=["pdf"], key="lab_pdf")
-    st.caption("Sprint RG-2 will parse the sample tables automatically. For RG-1, results are entered below but linked to samples so locations never need to be retyped.")
+    lab_pdf = st.file_uploader("PRO-LAB Certificate of Mold Analysis (PDF) *", type=["pdf"], key="lab_pdf")
+    st.caption(
+        "RG-2 reads the actual PRO-LAB result table only. Narrative definitions and mold reference pages are ignored."
+    )
+
+    if lab_pdf is not None:
+        if st.button("Analyze PRO-LAB Report", type="primary", key="analyze_prolab"):
+            parsed = parse_prolab_pdf(lab_pdf.getvalue())
+            st.session_state.prolab_parsed = parsed
+            st.session_state.prolab_mapping = suggested_mapping(parsed, job)
+
+        parsed = st.session_state.get("prolab_parsed")
+        if parsed:
+            metadata = parsed.get("metadata", {})
+            c1, c2, c3 = st.columns(3)
+            c1.metric("PRO-LAB Report #", metadata.get("report_number") or "—")
+            c2.metric("Project", metadata.get("project_name") or "—")
+            c3.metric("Samples Parsed", len(parsed.get("samples", [])))
+            if metadata.get("test_location"):
+                st.caption(f"Lab test location: {metadata['test_location']}")
+
+            for warning in parsed.get("warnings", []):
+                st.warning(warning)
+
+            if parsed.get("samples"):
+                st.markdown("#### Review Parsed Samples")
+                st.info(
+                    "Confirm each PRO-LAB sample is mapped to the correct job sample before importing. "
+                    "The parser does not decide whether remediation is required."
+                )
+
+                job_sample_labels = {sample_label(s): s["id"] for s in job["samples"]}
+                label_by_id = {v: k for k, v in job_sample_labels.items()}
+                mapping = st.session_state.setdefault(
+                    "prolab_mapping", suggested_mapping(parsed, job)
+                )
+
+                for lab_sample in parsed["samples"]:
+                    with st.container(border=True):
+                        c1, c2 = st.columns([2.1, 1.5])
+                        with c1:
+                            st.markdown(
+                                f"**{lab_sample.get('location') or 'Unnamed lab sample'}**  "
+                                f"— COC {lab_sample.get('coc_line') or '—'}"
+                            )
+                            st.write(
+                                f"Serial: {lab_sample.get('serial_number') or '—'} | "
+                                f"Type: {lab_sample.get('sample_type') or '—'} | "
+                                f"Volume: {lab_sample.get('volume') or '—'}"
+                            )
+                            st.write(
+                                f"PRO-LAB determination: **{lab_sample.get('determination') or '—'}**"
+                            )
+                            if lab_sample.get("fungi"):
+                                st.dataframe(
+                                    [
+                                        {"Fungal Type": fungus, "Spores/m³": count}
+                                        for fungus, count in lab_sample["fungi"].items()
+                                    ],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                            if lab_sample.get("total_spores") is not None:
+                                st.caption(f"Total spores: {lab_sample['total_spores']} spores/m³")
+
+                        with c2:
+                            option_labels = ["Do not import"] + list(job_sample_labels.keys())
+                            current_id = mapping.get(lab_sample["key"], "")
+                            current_label = label_by_id.get(current_id, "Do not import")
+                            selected_label = st.selectbox(
+                                "Map to job sample",
+                                option_labels,
+                                index=option_labels.index(current_label)
+                                if current_label in option_labels
+                                else 0,
+                                key=f"prolab_map_{lab_sample['key']}",
+                            )
+                            if selected_label == "Do not import":
+                                mapping.pop(lab_sample["key"], None)
+                            else:
+                                mapping[lab_sample["key"]] = job_sample_labels[selected_label]
+
+                if st.button("Accept & Import Reviewed Lab Results", key="apply_prolab"):
+                    apply_prolab_results(
+                        job,
+                        parsed,
+                        mapping,
+                        supported_molds=MOLD_DESCRIPTIONS.keys(),
+                    )
+                    st.session_state["mold_types"] = list(job.get("mold_types", []))
+                    st.success(
+                        "Reviewed PRO-LAB results imported. You can still edit any result row below."
+                    )
+                    st.rerun()
 
     st.markdown('<p class="section-header">Air Sample Result Rows</p>', unsafe_allow_html=True)
     air_samples = [s for s in job["samples"] if s["type"] == "Air Sample"]
