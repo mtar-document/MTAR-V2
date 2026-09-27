@@ -1,0 +1,503 @@
+from __future__ import annotations
+
+from io import BytesIO
+from pathlib import Path
+
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import nsdecls, qn
+from docx.shared import Inches, Pt, RGBColor
+
+from models import sample_location
+
+BASE_DIR = Path(__file__).resolve().parent
+ASSET_DIR = BASE_DIR / "assets"
+
+MOLD_DESCRIPTIONS = {
+    "Alternaria": ("A common outdoor mold that often indicates water damage when found indoors. Frequently grows on water-intruded building materials like damp drywall, wood, and textiles. Known allergen and common asthma trigger.", True),
+    "Chaetomium": ("A water-indicating mold found on cellulose materials. Should not be observed indoors unless building materials have been wetted.", True),
+    "Cladosporium": ("The most common spore type worldwide. Commonly found on wood and wallboard. Known allergen but also common outdoors.", False),
+    "Curvularia": ("A common outdoor mold and plant pathogen. When found indoors, it can grow on various building materials and may indicate moisture issues. Known allergen.", False),
+    "Epicoccum": ("A widespread outdoor fungus commonly found on plant debris. When found indoors, it is typically associated with water-damaged building materials like drywall or paper. Known allergen.", False),
+    "Hyphae": ("Fragments of fungal structures (the root system of mold). Finding these in high concentrations indoors strongly indicates active mold growth and amplification.", True),
+    "Other Ascospores": ("Spores from a large group of fungi common everywhere outdoors. When found indoors in higher concentrations, they may indicate moisture issues.", False),
+    "Other Basidiospores": ("A common outdoor spore type originating from mushrooms and bracket fungi. High indoor concentrations can sometimes indicate wood decay or structural moisture problems.", False),
+    "Penicillium/Aspergillus": ("The most common mold species in indoor air samples. Often associated with water damage and elevated humidity. Known allergen (Type I and Type III).", False),
+    "Smuts, myxomycetes": ("Common spores found outdoors on plants, grasses, and in soil. They rarely grow indoors; their presence is usually due to normal infiltration of outdoor air.", False),
+    "Stachybotrys": ("Known as 'black mold.' Requires high water content to grow. A water-indicating mold that produces mycotoxins. Professional remediation required.", True),
+    "Trichocladium": ("Rarely seen in the air, this mold grows most commonly on decaying or wetted wood.", False),
+}
+
+
+def set_cell_shading(cell, color: str):
+    shading_elm = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color}"/>')
+    cell._tc.get_or_add_tcPr().append(shading_elm)
+
+
+def make_tight(para):
+    para.paragraph_format.space_before = Pt(0)
+    para.paragraph_format.space_after = Pt(0)
+    para.paragraph_format.line_spacing = 1.15
+    return para
+
+
+def make_top_tight(para):
+    para.paragraph_format.space_before = Pt(0)
+    para.paragraph_format.line_spacing = 1.15
+    return para
+
+
+def add_floating_image(paragraph, image_path: Path, width, x_pos: float, y_pos: float):
+    if not image_path.exists():
+        return
+    run = paragraph.add_run()
+    shape = run.add_picture(str(image_path), width=width)
+    inline = shape._inline
+    extent = inline.extent
+    graphic_xml = inline.graphic.xml
+    x_emu = int(x_pos * 914400)
+    y_emu = int(y_pos * 914400)
+    anchor_xml = (
+        f'<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
+        f'relativeHeight="251658240" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" '
+        f'{nsdecls("wp", "a", "pic", "r")}>'
+        f'<wp:simplePos x="0" y="0"/>'
+        f'<wp:positionH relativeFrom="page"><wp:posOffset>{x_emu}</wp:posOffset></wp:positionH>'
+        f'<wp:positionV relativeFrom="page"><wp:posOffset>{y_emu}</wp:posOffset></wp:positionV>'
+        f'<wp:extent cx="{extent.cx}" cy="{extent.cy}"/>'
+        f'<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+        f'<wp:wrapNone/>'
+        f'<wp:docPr id="1" name="FixedImage"/>'
+        f'<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+        f'{graphic_xml}'
+        f'</wp:anchor>'
+    )
+    anchor = parse_xml(anchor_xml)
+    inline.getparent().replace(inline, anchor)
+
+
+def add_page_number(run):
+    fld_char1 = OxmlElement("w:fldChar")
+    fld_char1.set(qn("w:fldCharType"), "begin")
+    instr_text = OxmlElement("w:instrText")
+    instr_text.set(qn("xml:space"), "preserve")
+    instr_text.text = "PAGE"
+    fld_char2 = OxmlElement("w:fldChar")
+    fld_char2.set(qn("w:fldCharType"), "end")
+    run._r.append(fld_char1)
+    run._r.append(instr_text)
+    run._r.append(fld_char2)
+
+
+def _sample_map(job: dict) -> dict[str, dict]:
+    return {s["id"]: s for s in job.get("samples", [])}
+
+
+def _lab_rows_for_report(job: dict) -> list[dict]:
+    samples = _sample_map(job)
+    rows = []
+    for row in job.get("air_lab_rows", []):
+        sample = samples.get(row.get("sample_id"), {})
+        rows.append(
+            {
+                "location": sample_location(sample, job.get("areas", [])),
+                "fungal_type": row.get("fungal_type", ""),
+                "spore_count": row.get("spore_count", 0),
+                "interpretation": row.get("interpretation", ""),
+            }
+        )
+    return rows
+
+
+def _surface_rows_for_report(job: dict) -> list[dict]:
+    samples = _sample_map(job)
+    rows = []
+    for row in job.get("surface_lab_rows", []):
+        sample = samples.get(row.get("sample_id"), {})
+        rows.append(
+            {
+                "location": sample_location(sample, job.get("areas", [])),
+                "result": row.get("result", ""),
+            }
+        )
+    return rows
+
+
+def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -> BytesIO:
+    """Generate the V2 draft Word report from one structured job record."""
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.name = "Arial"
+    style.font.size = Pt(11)
+
+    section = doc.sections[0]
+    footer_para = section.footer.paragraphs[0]
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    add_page_number(footer_para.add_run())
+    add_floating_image(
+        footer_para,
+        ASSET_DIR / "Azeem_TDLR_Signature.png",
+        width=Inches(0.69),
+        x_pos=7.7,
+        y_pos=0.1,
+    )
+
+    contact = make_tight(doc.add_paragraph())
+    add_floating_image(contact, ASSET_DIR / "MTAR_logo.png", width=Inches(2.92), x_pos=1.0, y_pos=0.75)
+    contact.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    contact.add_run("Mold Testing and Removal\n")
+    contact.add_run("2031 John West Rd. #119\n")
+    contact.add_run("Dallas, TX 75228\n")
+    contact.add_run("(817) 718-5086\n")
+    contact.add_run("help@moldtestingandremoval.com")
+
+    make_tight(doc.add_paragraph())
+    title = make_tight(doc.add_paragraph())
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("MOLD ASSESSMENT REPORT")
+    run.font.name = "Bebas Neue"
+    run.bold = True
+    run.font.size = Pt(30)
+    run.font.color.rgb = RGBColor(24, 64, 88)
+    make_tight(doc.add_paragraph())
+
+    if photos.get("property"):
+        try:
+            p = make_tight(doc.add_paragraph())
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.add_run().add_picture(photos["property"], width=Inches(5))
+        except Exception:
+            pass
+
+    make_tight(doc.add_paragraph())
+    info = make_tight(doc.add_paragraph())
+    run = info.add_run("Client & Property:\n")
+    run.font.name = "Bebas Neue"
+    run.bold = True
+    run.font.color.rgb = RGBColor(24, 64, 88)
+    run.font.size = Pt(15)
+    info.add_run(f"{job['client_name']}\n{job['address']}\n{job['city']}, {job['state']} {job['zip']}\n")
+
+    info2 = make_tight(doc.add_paragraph())
+    run = info2.add_run("Assessment Date: ")
+    run.font.name = "Bebas Neue"
+    run.bold = True
+    run.font.color.rgb = RGBColor(24, 64, 88)
+    run.font.size = Pt(15)
+    info2.add_run(job["inspection_date"].strftime("%B %d, %Y"))
+
+    info3 = make_tight(doc.add_paragraph())
+    run = info3.add_run("Report Date: ")
+    run.font.name = "Bebas Neue"
+    run.bold = True
+    run.font.color.rgb = RGBColor(24, 64, 88)
+    run.font.size = Pt(15)
+    info3.add_run(job["report_date"].strftime("%B %d, %Y"))
+
+    info4 = make_tight(doc.add_paragraph())
+    run = info4.add_run("Samples Taken:\n")
+    run.font.name = "Bebas Neue"
+    run.bold = True
+    run.font.color.rgb = RGBColor(24, 64, 88)
+    run.font.size = Pt(15)
+    for index, sample in enumerate(job.get("samples", []), 1):
+        prefix = "Exterior control sample" if sample.get("outdoor_control") else f"Sample {index - 1}"
+        info4.add_run(f"{prefix}: {sample['type']} taken at {sample_location(sample, job['areas'])}\n")
+
+    doc.add_page_break()
+    letter_header = make_tight(doc.add_paragraph())
+    r = letter_header.add_run("State Licensed Mold Assessment Consultant:\n")
+    r.bold = True
+    letter_header.add_run("Azeem Iqbal — TDLR MAC #2189\n\n")
+    r = letter_header.add_run("Report Date:\n")
+    r.bold = True
+    letter_header.add_run(job["report_date"].strftime("%B %d, %Y"))
+    make_tight(doc.add_paragraph())
+    doc.add_paragraph("To whom it may concern,")
+
+    doc.add_paragraph(
+        f"Mold Testing and Removal was hired to conduct a mold assessment at the property located at "
+        f"{job['address']}, {job['city']}, {job['state']} {job['zip']}. The purpose of this assessment was to "
+        "evaluate the indoor air quality, identify potential sources of fungal growth, and provide recommendations for remediation."
+    )
+    doc.add_paragraph(
+        "The assessment included a visual inspection, moisture mapping using a Protimeter Moisture Meter, "
+        "and the collection of bioaerosol (air) and surface (swab) samples. Samples were collected from the "
+        "interior of the property and the exterior for control purposes."
+    )
+    doc.add_paragraph("The samples were sent to PRO-LAB, an accredited laboratory, for viable mold/fungi analysis.")
+
+    remediation_required = job.get("report_outcome") == "Mold remediation required"
+    if remediation_required:
+        results_p = doc.add_paragraph()
+        results_p.add_run("Based on the laboratory results and visual inspection, ")
+        r = results_p.add_run("active mold growth was confirmed")
+        r.bold = True
+        r.italic = True
+        results_p.add_run(" in the following areas:")
+        for area in job.get("areas", []):
+            if not area.get("name"):
+                continue
+            bullet = doc.add_paragraph(style="List Bullet")
+            bullet.add_run(f"{area['name']} — {area.get('finding', '')}")
+        notification = doc.add_paragraph()
+        r = notification.add_run(
+            "This letter serves as official notification that professional mold remediation is required to return "
+            "the property to a normal fungal ecology (Condition 1). The property should be remediated by a State "
+            "Licensed Mold Remediation Contractor (MRC) in accordance with the Texas Mold Assessment and Remediation Rules (TMARR)."
+        )
+        r.bold = True
+    else:
+        results_p = doc.add_paragraph()
+        results_p.add_run("Based on the laboratory results and visual inspection, ")
+        r = results_p.add_run("no significant mold contamination was identified")
+        r.bold = True
+        r.italic = True
+        results_p.add_run(". The indoor spore counts are within normal parameters compared to the outdoor control sample.")
+
+    doc.add_paragraph()
+    doc.add_paragraph("Sincerely,")
+    sig = make_tight(doc.add_paragraph())
+    r = sig.add_run("Azeem Iqbal")
+    r.bold = True
+    r.font.size = Pt(12)
+    sig_para = make_tight(doc.add_paragraph())
+    if (ASSET_DIR / "Signature.png").exists():
+        sig_para.add_run().add_picture(str(ASSET_DIR / "Signature.png"), width=Inches(0.9))
+    make_tight(doc.add_paragraph("State of Texas Licensed Mold Assessment Consultant"))
+    make_tight(doc.add_paragraph("TDLR MAC #2189 (Exp. 10/24/2027)"))
+
+    doc.add_page_break()
+    obs_title = make_tight(doc.add_paragraph())
+    r = obs_title.add_run("Visual Observations & Moisture Readings")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+
+    env_p = make_top_tight(doc.add_paragraph())
+    r = env_p.add_run("Environmental Conditions: ")
+    r.bold = True
+    env_p.add_run("The indoor relative humidity (rH) was recorded at ")
+    r = env_p.add_run(f"{job['humidity']}%")
+    r.bold = True
+    env_p.add_run(", which is ")
+    if job["humidity"] > 50:
+        r.font.color.rgb = RGBColor(220, 53, 69)
+        env_p.add_run("above the recommended range (30-50%) and conducive to microbial growth.")
+    else:
+        env_p.add_run("within the recommended range (30-50%).")
+
+    ocs_title = make_tight(doc.add_paragraph())
+    r = ocs_title.add_run("Outdoor Control Sample")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+    make_top_tight(doc.add_paragraph("An air sample is taken outside to serve as a baseline for all other air samples to be compared against."))
+
+    for area in job.get("areas", []):
+        if not area.get("name"):
+            continue
+        doc.add_page_break()
+        area_title = make_tight(doc.add_paragraph())
+        r = area_title.add_run(area["name"])
+        r.font.name = "Bebas Neue"
+        r.bold = True
+        r.font.color.rgb = RGBColor(24, 64, 88)
+        r.font.size = Pt(17)
+        if area.get("description"):
+            doc.add_paragraph(area["description"])
+        if area.get("moisture_notes"):
+            p = doc.add_paragraph()
+            rr = p.add_run("Moisture Assessment: ")
+            rr.bold = True
+            p.add_run(area["moisture_notes"])
+        area_photo = photos.get(area["id"])
+        if area_photo:
+            try:
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p.add_run().add_picture(area_photo, width=Inches(3))
+            except Exception:
+                pass
+
+    doc.add_page_break()
+    lab_title = make_tight(doc.add_paragraph())
+    r = lab_title.add_run("Laboratory Results Analysis")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+    make_top_tight(doc.add_paragraph(
+        "Samples were submitted to PRO-LAB (an accredited laboratory) for analysis. "
+        "The following summarizes the findings compared to the outdoor control sample."
+    ))
+
+    air_title = make_tight(doc.add_paragraph())
+    r = air_title.add_run("Air Sample Comparison (Bioaerosol)")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+    air_table = doc.add_table(rows=1, cols=4)
+    air_table.style = "Table Grid"
+    headers = ["Location", "Fungal Type", "Spores/m³", "Interpretation"]
+    for i, text in enumerate(headers):
+        cell = air_table.rows[0].cells[i]
+        cell.text = text
+        cell.paragraphs[0].runs[0].bold = True
+        set_cell_shading(cell, "D5E8F0")
+    for sample in _lab_rows_for_report(job):
+        row = air_table.add_row()
+        row.cells[0].text = sample["location"]
+        row.cells[1].text = sample["fungal_type"]
+        row.cells[2].text = str(sample["spore_count"])
+        row.cells[3].text = sample["interpretation"]
+        if sample["interpretation"].upper() == "ELEVATED":
+            set_cell_shading(row.cells[2], "FFCCCC")
+            set_cell_shading(row.cells[3], "FFCCCC")
+            row.cells[3].paragraphs[0].runs[0].font.color.rgb = RGBColor(220, 53, 69)
+            row.cells[3].paragraphs[0].runs[0].bold = True
+
+    doc.add_paragraph()
+    surface_title = make_tight(doc.add_paragraph())
+    r = surface_title.add_run("Surface Sample Results (Swab)")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+    surface_table = doc.add_table(rows=1, cols=3)
+    surface_table.style = "Table Grid"
+    for i, text in enumerate(["Location", "Sample Type", "Result"]):
+        cell = surface_table.rows[0].cells[i]
+        cell.text = text
+        cell.paragraphs[0].runs[0].bold = True
+        set_cell_shading(cell, "D5E8F0")
+    for sample in _surface_rows_for_report(job):
+        row = surface_table.add_row()
+        row.cells[0].text = sample["location"]
+        row.cells[1].text = "Swab"
+        row.cells[2].text = sample["result"]
+        if "UNUSUAL" in sample["result"].upper() or "MOLD PRESENT" in sample["result"].upper():
+            set_cell_shading(row.cells[2], "FFCCCC")
+            row.cells[2].paragraphs[0].runs[0].font.color.rgb = RGBColor(220, 53, 69)
+            row.cells[2].paragraphs[0].runs[0].bold = True
+
+    doc.add_paragraph()
+    mold_title = make_tight(doc.add_paragraph())
+    r = mold_title.add_run("Mold Types Identified")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+    for mold_type in job.get("mold_types", []):
+        description, dangerous = MOLD_DESCRIPTIONS[mold_type]
+        p = doc.add_paragraph()
+        rr = p.add_run(f"{mold_type}: ")
+        rr.bold = True
+        if dangerous:
+            rr.font.color.rgb = RGBColor(220, 53, 69)
+        p.add_run(description)
+
+    doc.add_page_break()
+    conc_title = make_tight(doc.add_paragraph())
+    r = conc_title.add_run("Conclusions")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+    doc.add_paragraph("Based on the visual inspection, moisture readings, and laboratory results, the following conclusions are made:")
+    for i, area in enumerate([a for a in job.get("areas", []) if a.get("name")], 1):
+        p = doc.add_paragraph()
+        rr = p.add_run(f"{i}. {area['name']}: ")
+        rr.bold = True
+        p.add_run(area.get("finding", ""))
+
+    doc.add_paragraph()
+    rec_title = make_tight(doc.add_paragraph())
+    r = rec_title.add_run("Recommendations")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+
+    if remediation_required:
+        doc.add_paragraph("To return the property to a normal fungal ecology (Condition 1), the following remediation steps are recommended:")
+        recommendations = [
+            ("Professional Remediation", "Hire a State Licensed Mold Remediation Contractor (MRC) to prepare a work plan based on a Mold Remediation Protocol prepared by a TDLR Mold Assessment Consultant."),
+            ("Containment", "Establish critical barriers (polyethylene sheeting) around affected areas to prevent spore dispersion. Establish negative air pressure."),
+            ("Removal", "Remove and discard affected drywall and materials. Continue removal 2 feet beyond visible growth."),
+            ("Cleaning", "HEPA vacuum and damp-wipe all remaining structural surfaces within the containment."),
+            ("Humidity Control", "Dehumidification is required to lower the indoor RH to between 30-50%."),
+            ("Clearance Testing", "After remediation, a Post-Remediation Assessment (clearance test) must be performed by a TDLR Mold Assessment Consultant."),
+        ]
+    else:
+        doc.add_paragraph("Based on the findings, the following recommendations are made:")
+        recommendations = [
+            ("Humidity Control", "Maintain indoor relative humidity between 30-50% to prevent future mold growth."),
+            ("Regular Inspection", "Periodically check areas prone to moisture for signs of water intrusion or condensation."),
+            ("Ventilation", "Ensure proper ventilation in bathrooms, kitchens, and laundry areas."),
+        ]
+    for title_text, body in recommendations:
+        p = doc.add_paragraph(style="List Bullet")
+        rr = p.add_run(f"{title_text}: ")
+        rr.bold = True
+        p.add_run(body)
+
+    doc.add_paragraph()
+    compliance = doc.add_paragraph()
+    r = compliance.add_run(
+        "This report is generated in accordance with the Texas Mold Assessment and Remediation Rules (TMARR). "
+        "Limitations: This inspection is limited to the areas accessible at the time of inspection."
+    )
+    r.italic = True
+    r.font.size = Pt(9)
+
+    doc.add_page_break()
+    terms_title = make_tight(doc.add_paragraph())
+    r = terms_title.add_run("Terms and Conditions")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(17)
+    terms = [
+        ("Inspection Limitation", "This inspection and the information set forth in the report is provided solely for the purpose of verifying that certain structural or physical characteristics exist at the Location Address listed. The undersigned and company representative does not make a health or safety certification or warranty, express or implied, of any kind."),
+        ("Limitation of Liability", "The Client agrees that Inspector's liability for errors and/or omissions shall be limited to the maximum of a full refund of the fee paid for the inspection. The Client agrees to assume all risk of loss which exceeds the fee paid."),
+        ("Sampling Limitations", "Mold spore sampling results represent conditions at the time and location of sampling only. Conditions can change rapidly due to environmental factors, occupant activities, and remediation efforts."),
+        ("Health Disclaimer", "This report does not constitute medical advice. Individuals with health concerns related to potential mold exposure should consult with a qualified healthcare professional."),
+        ("Report Usage", "This report is prepared exclusively for the named client and may not be reproduced or distributed to third parties without written consent from Mold Testing and Removal."),
+    ]
+    for title_text, body in terms:
+        p = doc.add_paragraph()
+        rr = p.add_run(f"{title_text}: ")
+        rr.bold = True
+        rr.font.size = Pt(10)
+        p.add_run(body).font.size = Pt(10)
+
+    doc.add_paragraph()
+    lab_ref = doc.add_paragraph()
+    lab_ref.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = lab_ref.add_run("— Laboratory Report Attached —")
+    r.bold = True
+    r.italic = True
+    lab_ref2 = doc.add_paragraph()
+    lab_ref2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    lab_ref2.add_run("PRO-LAB Certificate of Mold Analysis follows this page")
+
+    doc.add_paragraph()
+    company_footer = doc.add_paragraph()
+    company_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = company_footer.add_run("Mold Testing and Removal\n")
+    r.font.name = "Bebas Neue"
+    r.bold = True
+    r.font.color.rgb = RGBColor(24, 64, 88)
+    r.font.size = Pt(20)
+    company_footer.add_run("2031 John West Rd. #119 | Dallas, TX 75228\n")
+    company_footer.add_run("(817) 718-5086 | help@moldtestingandremoval.com")
+
+    output = BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output
