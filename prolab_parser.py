@@ -365,7 +365,13 @@ def apply_prolab_results(
     mapping: dict[str, str],
     supported_molds: Iterable[str],
 ) -> dict:
-    """Apply reviewed parsed results to V2 without deciding report outcome."""
+    """Apply reviewed parsed results to V2 without deciding report outcome.
+
+    Air-result row interpretations are a simple species-by-species comparison
+    against the mapped outdoor control. The original PRO-LAB sample-level
+    determination is preserved separately on each sample and remains visible
+    for consultant review.
+    """
     supported = set(supported_molds)
     sample_map = {s["id"]: s for s in job.get("samples", [])}
     air_rows: list[dict] = []
@@ -373,6 +379,18 @@ def apply_prolab_results(
     detected_molds: list[str] = []
 
     from models import new_air_lab_row, new_surface_lab_row
+
+    # Build the outdoor species baseline from the reviewed sample mapping.
+    outdoor_fungi: dict[str, int] = {}
+    for lab in parsed.get("samples", []):
+        mapped_id = mapping.get(lab.get("key", ""))
+        mapped_sample = sample_map.get(mapped_id or "")
+        if mapped_sample and mapped_sample.get("outdoor_control") and lab.get("is_air"):
+            outdoor_fungi = {
+                fungus: int(count or 0)
+                for fungus, count in lab.get("fungi", {}).items()
+            }
+            break
 
     for lab in parsed.get("samples", []):
         job_sample_id = mapping.get(lab.get("key", ""))
@@ -387,20 +405,38 @@ def apply_prolab_results(
         job_sample["lab_determination"] = lab.get("determination", "")
         job_sample["lab_collection_date"] = lab.get("collection_date", "")
         job_sample["lab_analysis_date"] = lab.get("analysis_date", "")
+        job_sample["lab_total_spores"] = lab.get("total_spores")
+        job_sample["lab_fungi"] = dict(lab.get("fungi", {}))
 
         if lab.get("is_air"):
-            interpretation = (
-                "Baseline (Reference)"
-                if job_sample.get("outdoor_control")
-                else ("ELEVATED" if lab.get("determination") == "ELEVATED" else "Not Elevated")
-            )
             for fungus, count in lab.get("fungi", {}).items():
+                numeric_count = int(count or 0)
+                if job_sample.get("outdoor_control"):
+                    interpretation = "Baseline (Reference)"
+                elif fungus in outdoor_fungi:
+                    outdoor_count = outdoor_fungi[fungus]
+                    interpretation = (
+                        "ELEVATED"
+                        if numeric_count > 0 and numeric_count >= outdoor_count
+                        else "Not Elevated"
+                    )
+                else:
+                    # Fallback only when this species is absent from the outdoor
+                    # control. The sample-level lab determination is not used to
+                    # overwrite a direct species comparison when one exists.
+                    interpretation = (
+                        "ELEVATED"
+                        if _upper(lab.get("determination", "")) == "ELEVATED"
+                        else "Not Elevated"
+                    )
+
                 row = new_air_lab_row(job_sample_id)
                 row["fungal_type"] = fungus
-                row["spore_count"] = int(count or 0)
+                row["spore_count"] = numeric_count
                 row["interpretation"] = interpretation
                 air_rows.append(row)
-                if fungus in supported and int(count or 0) > 0 and fungus not in detected_molds:
+
+                if fungus in supported and numeric_count > 0 and fungus not in detected_molds:
                     detected_molds.append(fungus)
         else:
             row = new_surface_lab_row(job_sample_id)
