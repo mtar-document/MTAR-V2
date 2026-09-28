@@ -1,40 +1,56 @@
 # MTAR-V2
 
-Separate V2 workspace for the Mold Testing and Removal report automation project.
+V2 workspace for Mold Testing and Removal report automation.
 
-The original production report generator is not modified by this repository.
+## Current workflow — RG-2
 
-## Sprint RG-1 — Structured job record
+The report workflow is now designed around the PRO-LAB certificate:
 
-RG-1 rebuilt the app around one reusable job record:
+1. Upload the PRO-LAB Certificate of Mold Analysis.
+2. MTAR parses supported data from the structured result table.
+3. MTAR automatically creates a **review-required draft DOCX**.
+4. The consultant reviews and completes information the lab report cannot provide.
+5. Photos can be added.
+6. The consultant explicitly approves the findings and generates the final DOCX.
 
-- client/property information
-- inspection areas
-- samples linked to areas
-- photos linked to stable area IDs
-- lab result rows linked to samples
-- consultant-selected overall report outcome
-- DOCX generation using the existing report appearance and language
+### Automatically imported from PRO-LAB when available
 
-## Sprint RG-2 — PRO-LAB import
+- project/client name
+- property/test location
+- PRO-LAB report number
+- report date
+- sample collection date
+- COC / line number
+- sample location
+- sample type
+- volume
+- serial number
+- PRO-LAB determination
+- fungal types
+- spores/m³
+- total spores
 
-RG-2 adds a reviewed PRO-LAB PDF import workflow:
+### Intentionally left for consultant review
 
-- reads report metadata such as project name and PRO-LAB report number
-- reads populated sample columns from the structured result table
-- extracts COC/line number, sample location, sample type, volume, serial number, dates, and PRO-LAB determination
-- extracts air-sample fungal types, spores/m³, and total spores from the result table
-- ignores narrative definition text and mold reference pages when determining findings
-- suggests mappings from PRO-LAB samples to the existing V2 job samples
-- requires the consultant to review those mappings before importing
-- keeps all imported rows editable after import
-- does **not** decide the professional report outcome or whether remediation is required
+The application does not invent inspection facts that are absent from the laboratory certificate. These remain review fields:
 
-The parser is in `prolab_parser.py`.
+- exact affected-area name when the lab only says "INDOORS"
+- visual observations
+- moisture readings
+- inspection-area finding
+- indoor RH when not supplied
+- final professional conclusion
+- remediation/no-remediation decision
 
-## Current safety rule
+A new job defaults to **Pending consultant review**. A draft report shows **DRAFT - CONSULTANT REVIEW REQUIRED** and withholds final recommendations until the licensed consultant completes review.
 
-The application treats the PRO-LAB report as source data. Parsed numbers and laboratory determinations can be imported automatically, but the licensed consultant still reviews the data and selects the final report outcome.
+## Files
+
+- `app.py` — Streamlit upload → draft → review → final workflow
+- `models.py` — job/area/sample data model and final validation
+- `prolab_parser.py` — structured PRO-LAB parser and automatic draft-job builder
+- `report_builder.py` — DOCX generator with draft/final behavior
+- `assets/` — MTAR logo and signature assets
 
 ## Run locally
 
@@ -43,14 +59,13 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Folder layout
+On Windows, if `streamlit` is not on PATH:
 
-- `app.py` — Streamlit V2 UI
-- `models.py` — job/area/sample state model
-- `prolab_parser.py` — structured PRO-LAB PDF parser and reviewed import mapping
-- `report_builder.py` — DOCX generation
-- `assets/` — logo and signature images
+```powershell
+py -m pip install -r requirements.txt
+py -m streamlit run app.py
+```
 
-## Next report-automation sprint
+## Next sprint
 
 RG-3 will focus on multi-photo upload, photo categories, and automatic photo layout in the generated report.
