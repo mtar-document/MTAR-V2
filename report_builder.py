@@ -245,12 +245,21 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
         f"{job['address']}, {job['city']}, {job['state']} {job['zip']}. The purpose of this assessment was to "
         "evaluate the indoor air quality, identify potential sources of fungal growth, and provide recommendations for remediation."
     )
+    has_air_samples = any(s.get("type") == "Air Sample" for s in job.get("samples", []))
+    has_surface_samples = bool(job.get("surface_lab_rows"))
+    if has_air_samples and has_surface_samples:
+        sampling_text = "bioaerosol (air) and surface samples"
+    elif has_surface_samples:
+        sampling_text = "surface samples"
+    else:
+        sampling_text = "bioaerosol (air) samples"
+
     doc.add_paragraph(
         "The assessment included a visual inspection, moisture mapping using a Protimeter Moisture Meter, "
-        "and the collection of bioaerosol (air) and surface (swab) samples. Samples were collected from the "
-        "interior of the property and the exterior for control purposes."
+        f"and the collection of {sampling_text}. Samples were collected from the assessed areas"
+        + (" and the exterior for control purposes." if has_air_samples else ".")
     )
-    doc.add_paragraph("The samples were sent to PRO-LAB, an accredited laboratory, for viable mold/fungi analysis.")
+    doc.add_paragraph("The samples were sent to PRO-LAB, an accredited laboratory, for mold/fungi analysis.")
 
     report_outcome = job.get("report_outcome", "Pending consultant review")
     remediation_required = report_outcome == "Mold remediation required"
