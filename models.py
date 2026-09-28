@@ -27,6 +27,7 @@ def new_sample(
 ) -> dict:
     return {
         "id": _id("sample") if not outdoor_control else "sample_outdoor_control",
+        "name": "Outdoor Control" if outdoor_control else (location or ""),
         "type": sample_type,
         "location": location,
         "area_id": area_id,
@@ -67,8 +68,6 @@ def new_job_state() -> dict:
 
     return {
         "client_name": "",
-        "phone": "",
-        "email": "",
         "address": "",
         "city": "",
         "state": "TX",
@@ -126,6 +125,14 @@ def validate_job(job: dict, lab_pdf_present: bool) -> list[str]:
         missing.append("ZIP code")
     if not any(a.get("name", "").strip() for a in job.get("areas", [])):
         missing.append("At least one inspection area")
+    if job.get("humidity") is None:
+        missing.append("Indoor RH")
+    unassigned = [
+        s for s in job.get("samples", [])
+        if not s.get("outdoor_control") and not s.get("area_id")
+    ]
+    if unassigned:
+        missing.append("Assign every indoor/surface sample to an inspection area")
     if not lab_pdf_present:
         missing.append("PRO-LAB PDF")
     if job.get("report_outcome") in ("", "Pending consultant review"):
