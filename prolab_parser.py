@@ -9,6 +9,16 @@ import fitz
 
 
 AIR_SAMPLE_CODES = {"PRO-15", "PRO15", "P15", "AOC", "BRZ", "BREEZE", "SPORE TRAP", "ST"}
+SURFACE_SAMPLE_CODES = {
+    "SWAB",
+    "TAPE",
+    "TAPE LIFT",
+    "TAPE-LIFT",
+    "BULK",
+    "CARPET",
+    "CARPET CASSETTE",
+    "SURFACE",
+}
 
 
 def _norm(value: str) -> str:
@@ -166,6 +176,44 @@ def _numeric_nearest(words: list[dict], y: float, center: float, tolerance_y: fl
     txt = candidates[0][1]
     return int(float(txt)) if float(txt).is_integer() else float(txt)
 
+def _is_air_sample(sample_type: str, volume: str) -> bool:
+    """Classify PRO-LAB sample media without treating 'NA' volume as air."""
+    media = _upper(sample_type)
+    if media in SURFACE_SAMPLE_CODES:
+        return False
+    if media in AIR_SAMPLE_CODES:
+        return True
+
+    volume_text = _upper(volume).replace(" ", "")
+    if volume_text in {"", "NA", "N/A", "NOTAPPLICABLE"}:
+        return False
+    return bool(re.search(r"\d+(?:\.\d+)?L\b", volume_text))
+
+
+def _surface_mark_present(
+    words: list[dict],
+    y: float,
+    left: float,
+    right: float,
+    tolerance_y: float = 2.5,
+) -> bool:
+    """Return True when a surface-result cell contains an X/presence mark."""
+    text = _region_text(words, y - tolerance_y, y + tolerance_y + 7.0, left, right)
+    tokens = {_upper(token) for token in re.findall(r"[A-Za-z]+", text)}
+    return "X" in _upper(text).split() or bool(tokens & {"PRESENT", "POSITIVE"})
+
+
+def _sample_row_text(
+    words: list[dict],
+    row: dict | None,
+    left: float,
+    right: float,
+    height: float = 18.0,
+) -> str:
+    if not row:
+        return ""
+    return _region_text(words, row["y"] - 1.0, row["y"] + height, left, right)
+
 
 def _sample_key(sample: dict, page_number: int, index: int) -> str:
     return sample.get("coc_line") or sample.get("serial_number") or f"page{page_number}_sample{index + 1}"
@@ -207,6 +255,8 @@ def _parse_result_page(page: fitz.Page, page_number: int) -> tuple[list[dict], l
     serial_row = _find_row(lines, "SERIAL NUMBER")
     collection_row = _find_row(lines, "COLLECTION DATE")
     analysis_date_row = _find_row(lines, "ANALYSIS DATE")
+    background_row = _find_row(lines, "BACKGROUND DEBRIS")
+    observations_row = _find_row(lines, "OBSERVATIONS")
 
     row_order = [
         r
@@ -274,14 +324,16 @@ def _parse_result_page(page: fitz.Page, page_number: int) -> tuple[list[dict], l
             "determination": _upper(determination),
             "total_spores": None,
             "fungi": {},
-            "is_air": _upper(sample_type) in AIR_SAMPLE_CODES or bool(volume),
+            "background_debris": _sample_row_text(all_words, background_row, left, right),
+            "observations": _sample_row_text(all_words, observations_row, left, right),
+            "is_air": _is_air_sample(sample_type, volume),
         }
         sample["key"] = _sample_key(sample, page_number, idx)
         samples.append(sample)
 
     # Read only the actual result-table band. Narrative definitions and mold
     # reference pages never become findings.
-    if identification_row and total_row and any(s["is_air"] for s in samples):
+    if identification_row and total_row:
         species_lines = [
             line
             for line in lines
@@ -289,15 +341,20 @@ def _parse_result_page(page: fitz.Page, page_number: int) -> tuple[list[dict], l
         ]
         for line in species_lines:
             species = _norm(_left_text(line))
-            if not species or _upper(species) in {"RAW COUNT", "SPORES PER M³", "PERCENT OF TOTAL"}:
+            if not species or _upper(species) in {"RAW COUNT", "SPORES PER M³", "PERCENT OF TOTAL", "MOLD PRESENT"}:
                 continue
-            for sample, center in zip(samples, centers):
-                value = _numeric_nearest(all_words, line["y"], center)
-                if value is not None:
-                    sample["fungi"][species] = int(value)
+
+            for sample, center, (left, right) in zip(samples, centers, bounds):
+                if sample["is_air"]:
+                    value = _numeric_nearest(all_words, line["y"], center)
+                    if value is not None:
+                        sample["fungi"][species] = int(value)
+                elif _surface_mark_present(all_words, line["y"], left, right):
+                    sample["fungi"][species] = "Present"
 
         for sample, center in zip(samples, centers):
-            sample["total_spores"] = _numeric_nearest(all_words, total_row["y"], center)
+            if sample["is_air"]:
+                sample["total_spores"] = _numeric_nearest(all_words, total_row["y"], center)
 
     return samples, warnings
 
@@ -345,7 +402,10 @@ def suggested_mapping(parsed: dict, job: dict) -> dict[str, str]:
 
     outdoor_jobs = [s for s in job_samples if s.get("outdoor_control")]
     indoor_air_jobs = [s for s in job_samples if s.get("type") == "Air Sample" and not s.get("outdoor_control")]
-    swab_jobs = [s for s in job_samples if s.get("type") == "Swab"]
+    swab_jobs = [
+        s for s in job_samples
+        if s.get("type") in {"Swab", "Surface Sample"}
+    ]
 
     used: set[str] = set()
     for lab in parsed_samples:
@@ -408,6 +468,8 @@ def apply_prolab_results(
         job_sample["lab_analysis_date"] = lab.get("analysis_date", "")
         job_sample["lab_total_spores"] = lab.get("total_spores")
         job_sample["lab_fungi"] = dict(lab.get("fungi", {}))
+        job_sample["lab_background_debris"] = lab.get("background_debris", "")
+        job_sample["lab_observations"] = lab.get("observations", "")
 
         if lab.get("is_air"):
             for fungus, count in lab.get("fungi", {}).items():
