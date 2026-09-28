@@ -292,15 +292,21 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
     env_p = make_top_tight(doc.add_paragraph())
     r = env_p.add_run("Environmental Conditions: ")
     r.bold = True
-    env_p.add_run("The indoor relative humidity (rH) was recorded at ")
-    r = env_p.add_run(f"{job['humidity']}%")
-    r.bold = True
-    env_p.add_run(", which is ")
-    if job["humidity"] > 50:
+    humidity = job.get("humidity")
+    if humidity is None:
+        r = env_p.add_run("Indoor relative humidity was not entered in this draft. Consultant review required.")
+        r.italic = True
         r.font.color.rgb = RGBColor(220, 53, 69)
-        env_p.add_run("above the recommended range (30-50%) and conducive to microbial growth.")
     else:
-        env_p.add_run("within the recommended range (30-50%).")
+        env_p.add_run("The indoor relative humidity (rH) was recorded at ")
+        r = env_p.add_run(f"{humidity}%")
+        r.bold = True
+        env_p.add_run(", which is ")
+        if humidity > 50:
+            r.font.color.rgb = RGBColor(220, 53, 69)
+            env_p.add_run("above the recommended range (30-50%) and conducive to microbial growth.")
+        else:
+            env_p.add_run("within the recommended range (30-50%).")
 
     ocs_title = make_tight(doc.add_paragraph())
     r = ocs_title.add_run("Outdoor Control Sample")
