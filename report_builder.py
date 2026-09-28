@@ -461,9 +461,9 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
         r.bold = True
         r.font.color.rgb = RGBColor(24, 64, 88)
         r.font.size = Pt(17)
-        surface_table = doc.add_table(rows=1, cols=3)
+        surface_table = doc.add_table(rows=1, cols=4)
         surface_table.style = "Table Grid"
-        for i, text in enumerate(["Sample", "Assigned Area", "Result"]):
+        for i, text in enumerate(["Sample", "Assigned Area", "Mold Identified", "Result"]):
             cell = surface_table.rows[0].cells[i]
             cell.text = text
             cell.paragraphs[0].runs[0].bold = True
@@ -475,11 +475,18 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
             row = surface_table.add_row()
             row.cells[0].text = _sample_display_name(sample)
             row.cells[1].text = _assigned_area_name(sample, job.get("areas", []))
-            row.cells[2].text = source_row.get("result", "")
-            if "UNUSUAL" in row.cells[2].text.upper() or "MOLD PRESENT" in row.cells[2].text.upper():
+            surface_fungi = [
+                name
+                for name, value in sample.get("lab_fungi", {}).items()
+                if value not in (None, "", 0, False)
+            ]
+            row.cells[2].text = ", ".join(surface_fungi) if surface_fungi else "—"
+            row.cells[3].text = source_row.get("result", "")
+            if "UNUSUAL" in row.cells[3].text.upper() or "MOLD PRESENT" in row.cells[3].text.upper():
                 set_cell_shading(row.cells[2], "FFCCCC")
-                row.cells[2].paragraphs[0].runs[0].font.color.rgb = RGBColor(220, 53, 69)
-                row.cells[2].paragraphs[0].runs[0].bold = True
+                set_cell_shading(row.cells[3], "FFCCCC")
+                row.cells[3].paragraphs[0].runs[0].font.color.rgb = RGBColor(220, 53, 69)
+                row.cells[3].paragraphs[0].runs[0].bold = True
 
     doc.add_paragraph()
     mold_title = make_tight(doc.add_paragraph())
