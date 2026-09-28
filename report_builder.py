@@ -228,7 +228,10 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
     )
     doc.add_paragraph("The samples were sent to PRO-LAB, an accredited laboratory, for viable mold/fungi analysis.")
 
-    remediation_required = job.get("report_outcome") == "Mold remediation required"
+    report_outcome = job.get("report_outcome", "Pending consultant review")
+    remediation_required = report_outcome == "Mold remediation required"
+    pending_review = report_outcome in ("", "Pending consultant review")
+
     if remediation_required:
         results_p = doc.add_paragraph()
         results_p.add_run("Based on the laboratory results and visual inspection, ")
@@ -248,6 +251,16 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
             "Licensed Mold Remediation Contractor (MRC) in accordance with the Texas Mold Assessment and Remediation Rules (TMARR)."
         )
         r.bold = True
+    elif pending_review:
+        results_p = doc.add_paragraph()
+        r = results_p.add_run("DRAFT - CONSULTANT REVIEW REQUIRED")
+        r.bold = True
+        r.italic = True
+        r.font.color.rgb = RGBColor(220, 53, 69)
+        results_p.add_run(
+            ". Laboratory data has been imported, but visual findings, moisture observations, "
+            "area findings, and the final professional conclusion must be reviewed before this report is finalized."
+        )
     else:
         results_p = doc.add_paragraph()
         results_p.add_run("Based on the laboratory results and visual inspection, ")
@@ -279,15 +292,21 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
     env_p = make_top_tight(doc.add_paragraph())
     r = env_p.add_run("Environmental Conditions: ")
     r.bold = True
-    env_p.add_run("The indoor relative humidity (rH) was recorded at ")
-    r = env_p.add_run(f"{job['humidity']}%")
-    r.bold = True
-    env_p.add_run(", which is ")
-    if job["humidity"] > 50:
+    humidity = job.get("humidity")
+    if humidity is None:
+        r = env_p.add_run("Indoor relative humidity was not entered in this draft. Consultant review required.")
+        r.italic = True
         r.font.color.rgb = RGBColor(220, 53, 69)
-        env_p.add_run("above the recommended range (30-50%) and conducive to microbial growth.")
     else:
-        env_p.add_run("within the recommended range (30-50%).")
+        env_p.add_run("The indoor relative humidity (rH) was recorded at ")
+        r = env_p.add_run(f"{humidity}%")
+        r.bold = True
+        env_p.add_run(", which is ")
+        if humidity > 50:
+            r.font.color.rgb = RGBColor(220, 53, 69)
+            env_p.add_run("above the recommended range (30-50%) and conducive to microbial growth.")
+        else:
+            env_p.add_run("within the recommended range (30-50%).")
 
     ocs_title = make_tight(doc.add_paragraph())
     r = ocs_title.add_run("Outdoor Control Sample")
@@ -433,6 +452,11 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
             ("Humidity Control", "Dehumidification is required to lower the indoor RH to between 30-50%."),
             ("Clearance Testing", "After remediation, a Post-Remediation Assessment (clearance test) must be performed by a TDLR Mold Assessment Consultant."),
         ]
+    elif pending_review:
+        doc.add_paragraph(
+            "Recommendations are intentionally withheld in this draft until the licensed consultant completes review."
+        )
+        recommendations = []
     else:
         doc.add_paragraph("Based on the findings, the following recommendations are made:")
         recommendations = [
