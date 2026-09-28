@@ -12,7 +12,7 @@ def new_area(name: str = "") -> dict:
     return {
         "id": _id("area"),
         "name": name,
-        "finding": "Active mold growth confirmed",
+        "finding": "Needs consultant review",
         "description": "",
         "moisture_notes": "",
     }
@@ -98,7 +98,7 @@ def new_job_state() -> dict:
         ],
         "surface_lab_rows": [],
         "mold_types": ["Penicillium/Aspergillus"],
-        "report_outcome": "Mold remediation required",
+        "report_outcome": "Pending consultant review",
     }
 
 
@@ -128,4 +128,6 @@ def validate_job(job: dict, lab_pdf_present: bool) -> list[str]:
         missing.append("At least one inspection area")
     if not lab_pdf_present:
         missing.append("PRO-LAB PDF")
+    if job.get("report_outcome") in ("", "Pending consultant review"):
+        missing.append("Consultant report outcome")
     return missing
