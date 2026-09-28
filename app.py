@@ -36,7 +36,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown('<h1 class="main-header">MTAR V2 — Mold Assessment Report nigger nigger nigger</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">MTAR V2 — Mold Assessment Report</h1>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Sprint RG-1: one structured job record, one source of truth</p>', unsafe_allow_html=True)
 
 if "job" not in st.session_state:
