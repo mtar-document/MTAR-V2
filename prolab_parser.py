@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
 import re
 from typing import BinaryIO, Iterable
@@ -456,3 +457,197 @@ def apply_prolab_results(
 
     job["lab_metadata"] = dict(parsed.get("metadata", {}))
     return job
+
+
+def _parse_lab_date(value: str):
+    value = _norm(value)
+    if not value:
+        return None
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _split_test_location(value: str) -> dict:
+    """Split a PRO-LAB test-location string into editable property fields."""
+    value = _norm(value)
+    result = {"address": "", "city": "", "state": "", "zip": ""}
+    if not value:
+        return result
+
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if parts:
+        result["address"] = parts[0]
+
+    if len(parts) >= 3:
+        result["city"] = parts[1]
+        state_zip = parts[2]
+    elif len(parts) == 2:
+        state_zip_match = re.search(r"\b([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\b", parts[1], re.I)
+        if state_zip_match:
+            # In two-part strings, the city is commonly included before state/ZIP.
+            prefix = parts[1][: state_zip_match.start()].strip(" ,")
+            if prefix:
+                result["city"] = prefix
+            state_zip = state_zip_match.group(0)
+        else:
+            state_zip = parts[1]
+    else:
+        state_zip = ""
+
+    match = re.search(r"\b([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\b", state_zip, re.I)
+    if match:
+        result["state"] = match.group(1).upper()
+        result["zip"] = match.group(2)
+
+    # Fallback for the common "street, city, ST ZIP" pattern when text
+    # extraction produced an unexpected comma layout.
+    if not result["zip"]:
+        match = re.search(
+            r"^(.*?)[,\s]+([A-Za-z .'-]+),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$",
+            value,
+        )
+        if match:
+            result["address"] = _norm(match.group(1))
+            result["city"] = _norm(match.group(2))
+            result["state"] = match.group(3).upper()
+            result["zip"] = match.group(4)
+
+    return result
+
+
+def _review_area_name(location: str, index: int) -> str:
+    location = _norm(location)
+    generic = {
+        "",
+        "INDOOR",
+        "INDOORS",
+        "INTERIOR",
+        "INTERIOR SAMPLE",
+        "INDOOR SAMPLE",
+        "AIR SAMPLE",
+        "SAMPLE",
+    }
+    if _upper(location) in generic:
+        return f"Area of Concern {index}"
+    return location.title()
+
+
+def build_draft_job_from_prolab(
+    job: dict,
+    parsed: dict,
+    supported_molds: Iterable[str],
+) -> dict[str, str]:
+    """Build a review-ready V2 job directly from a parsed PRO-LAB report.
+
+    This intentionally fills only facts supported by the lab report. Visual
+    observations, moisture findings, area findings, and the overall consultant
+    conclusion remain marked for review.
+    """
+    from models import new_area, new_sample
+
+    metadata = parsed.get("metadata", {})
+    project_name = _norm(metadata.get("project_name", ""))
+    if project_name:
+        job["client_name"] = project_name.title()
+
+    property_fields = _split_test_location(metadata.get("test_location", ""))
+    for key in ("address", "city", "state", "zip"):
+        if property_fields.get(key):
+            value = property_fields[key]
+            job[key] = value.title() if key in ("address", "city") else value
+
+    report_date = _parse_lab_date(metadata.get("report_date", ""))
+    if report_date:
+        job["report_date"] = report_date
+
+    sample_dates = [
+        _parse_lab_date(sample.get("collection_date", ""))
+        for sample in parsed.get("samples", [])
+    ]
+    sample_dates = [d for d in sample_dates if d]
+    if sample_dates:
+        job["inspection_date"] = min(sample_dates)
+
+    areas: list[dict] = []
+    samples: list[dict] = []
+    mapping: dict[str, str] = {}
+    area_by_location: dict[str, str] = {}
+    generic_area_counter = 0
+
+    for lab in parsed.get("samples", []):
+        location = _norm(lab.get("location", ""))
+        determination = _upper(lab.get("determination", ""))
+        is_control = "OUTDOOR" in _upper(location) or determination == "CONTROL"
+
+        if is_control:
+            sample = new_sample(
+                sample_type="Air Sample",
+                location="Outdoor Control",
+                outdoor_control=True,
+            )
+            samples.append(sample)
+            mapping[lab["key"]] = sample["id"]
+            continue
+
+        sample_type = "Air Sample" if lab.get("is_air") else "Swab"
+        loc_key = _upper(location)
+        is_generic = loc_key in {
+            "",
+            "INDOOR",
+            "INDOORS",
+            "INTERIOR",
+            "INTERIOR SAMPLE",
+            "INDOOR SAMPLE",
+            "AIR SAMPLE",
+            "SAMPLE",
+        }
+
+        if is_generic:
+            generic_area_counter += 1
+            area = new_area(_review_area_name(location, generic_area_counter))
+            areas.append(area)
+            area_id = area["id"]
+        else:
+            area_id = area_by_location.get(loc_key)
+            if not area_id:
+                area = new_area(_review_area_name(location, len(areas) + 1))
+                areas.append(area)
+                area_id = area["id"]
+                area_by_location[loc_key] = area_id
+
+        sample = new_sample(
+            sample_type=sample_type,
+            location="",
+            area_id=area_id,
+        )
+        sample["lab_location"] = location
+        samples.append(sample)
+        mapping[lab["key"]] = sample["id"]
+
+    if not any(s.get("outdoor_control") for s in samples):
+        samples.insert(
+            0,
+            new_sample(
+                sample_type="Air Sample",
+                location="Outdoor Control",
+                outdoor_control=True,
+            ),
+        )
+
+    if not areas:
+        areas = [new_area("Area of Concern 1")]
+
+    job["areas"] = areas
+    job["samples"] = samples
+    job["air_lab_rows"] = []
+    job["surface_lab_rows"] = []
+    job["mold_types"] = []
+    job["report_outcome"] = "Pending consultant review"
+    job["lab_metadata"] = dict(metadata)
+
+    apply_prolab_results(job, parsed, mapping, supported_molds)
+    return mapping
