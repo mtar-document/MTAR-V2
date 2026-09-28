@@ -141,5 +141,64 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertIn("Laundry Air", air_table.rows[0].cells[2].text)
 
 
+    def test_surface_sample_report_includes_identified_organisms(self):
+        area = new_area("Coat Closet")
+        area["finding"] = "Visual mold present"
+
+        surface = new_sample("Surface Sample", area_id=area["id"])
+        surface["name"] = "COAT CLOSET"
+        surface["lab_fungi"] = {
+            "Cladosporium": "Present",
+            "Curvularia": "Present",
+            "Epicoccum": "Present",
+            "Hyphae": "Present",
+            "Other Ascospores": "Present",
+            "Other Basidiospores": "Present",
+            "Penicillium/Aspergillus": "Present",
+            "Smuts, myxomycetes": "Present",
+        }
+
+        job = new_job_state()
+        job.update({
+            "client_name": "Scarlet Harper",
+            "address": "16371 County Road 245",
+            "city": "Terrell",
+            "state": "TX",
+            "zip": "75160",
+            "humidity": 50,
+            "areas": [area],
+            "samples": [surface],
+            "air_lab_rows": [],
+            "surface_lab_rows": [{
+                "id": "surf1",
+                "sample_id": surface["id"],
+                "result": "UNUSUAL / Mold Present",
+            }],
+            "mold_types": [
+                "Cladosporium",
+                "Curvularia",
+                "Epicoccum",
+                "Hyphae",
+                "Other Ascospores",
+                "Other Basidiospores",
+                "Penicillium/Aspergillus",
+                "Smuts, myxomycetes",
+            ],
+            "report_outcome": "Mold remediation required",
+        })
+
+        report = create_report(job, {}, None)
+        doc = Document(BytesIO(report.getvalue()))
+        surface_table = next(
+            table for table in doc.tables
+            if table.rows and table.rows[0].cells[0].text == "Sample"
+        )
+
+        self.assertEqual(len(surface_table.columns), 4)
+        self.assertIn("Cladosporium", surface_table.rows[1].cells[2].text)
+        self.assertIn("Penicillium/Aspergillus", surface_table.rows[1].cells[2].text)
+        self.assertEqual(surface_table.rows[1].cells[3].text, "UNUSUAL / Mold Present")
+
+
 if __name__ == "__main__":
     unittest.main()
