@@ -75,7 +75,7 @@ def new_job_state() -> dict:
         "zip": "",
         "inspection_date": date.today(),
         "report_date": date.today(),
-        "humidity": 50,
+        "humidity": None,
         "temperature": None,
         "general_observations": "",
         "areas": [first_area],
