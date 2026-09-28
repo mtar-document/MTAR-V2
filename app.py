@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from pathlib import Path
+from io import BytesIO
 
 import streamlit as st
 
-from models import new_job_state, sample_location, validate_job
+from models import new_area, new_job_state, sample_location, validate_job
 from prolab_parser import build_draft_job_from_prolab, parse_prolab_pdf
 from report_builder import MOLD_DESCRIPTIONS, create_report
-
-BASE_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(
     page_title="MTAR V2 - Mold Assessment Report",
@@ -33,72 +31,105 @@ st.markdown(
 
 st.markdown('<h1 class="main-header">MTAR V2 — Mold Assessment Report</h1>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="sub-header">Upload PRO-LAB → automatic draft → consultant review → final report</p>',
+    '<p class="sub-header">Upload PRO-LAB → review areas & samples → add photos → final report</p>',
     unsafe_allow_html=True,
 )
 
 if "job" not in st.session_state:
     st.session_state.job = new_job_state()
-if "draft_docx" not in st.session_state:
-    st.session_state.draft_docx = None
-if "final_docx" not in st.session_state:
-    st.session_state.final_docx = None
 if "parsed_lab" not in st.session_state:
     st.session_state.parsed_lab = None
 if "lab_pdf_bytes" not in st.session_state:
     st.session_state.lab_pdf_bytes = None
 if "lab_pdf_hash" not in st.session_state:
     st.session_state.lab_pdf_hash = None
+if "automatic_draft" not in st.session_state:
+    st.session_state.automatic_draft = None
+if "final_docx" not in st.session_state:
+    st.session_state.final_docx = None
 
 job = st.session_state.job
 
 
 def sample_label(sample: dict) -> str:
+    name = (sample.get("name") or "").strip()
+    if name:
+        return name
     if sample.get("outdoor_control"):
         return "Outdoor Control"
     return sample_location(sample, job.get("areas", []))
 
 
 def collect_photos() -> dict:
+    """Return fresh file-like objects so python-docx can read them reliably."""
     photos = {}
     property_photo = st.session_state.get("photo_property")
     if property_photo:
-        photos["property"] = property_photo
+        photos["property"] = BytesIO(property_photo.getvalue())
+
     for area in job.get("areas", []):
         upload = st.session_state.get(f"photo_{area['id']}")
         if upload:
-            photos[area["id"]] = upload
+            photos[area["id"]] = BytesIO(upload.getvalue())
     return photos
 
 
 def build_report_bytes() -> bytes:
-    report_job = copy.deepcopy(job)
     output = create_report(
-        report_job,
+        copy.deepcopy(job),
         collect_photos(),
         st.session_state.get("lab_pdf_bytes"),
     )
     return output.getvalue()
 
 
-def build_draft():
-    st.session_state.draft_docx = build_report_bytes()
-    st.session_state.final_docx = None
-
-
 def reset_job():
-    preserved = {"job": new_job_state()}
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    st.session_state.update(preserved)
+    st.session_state.job = new_job_state()
     st.rerun()
 
 
 def final_review_issues() -> list[str]:
-    issues = validate_job(job, lab_pdf_present=st.session_state.get("lab_pdf_bytes") is not None)
+    issues = validate_job(
+        job,
+        lab_pdf_present=st.session_state.get("lab_pdf_bytes") is not None,
+    )
     if any(a.get("finding") == "Needs consultant review" for a in job.get("areas", [])):
         issues.append("Review every inspection-area finding")
     return issues
+
+
+def area_option_map() -> dict[str, str | None]:
+    result: dict[str, str | None] = {"Unassigned": None}
+    for index, area in enumerate(job.get("areas", []), 1):
+        name = (area.get("name") or f"Inspection Area {index}").strip()
+        result[f"{name} [{area['id'][-6:]}]"] = area["id"]
+    return result
+
+
+def air_results_matrix() -> list[dict]:
+    samples = {
+        s["id"]: s
+        for s in job.get("samples", [])
+        if s.get("type") == "Air Sample"
+    }
+    sample_ids = list(samples.keys())
+    species = []
+    values = {}
+    for row in job.get("air_lab_rows", []):
+        fungus = row.get("fungal_type", "")
+        if fungus and fungus not in species:
+            species.append(fungus)
+        values[(fungus, row.get("sample_id"))] = row.get("spore_count", 0)
+
+    matrix = []
+    for fungus in species:
+        record = {"Fungal Type": fungus}
+        for sample_id in sample_ids:
+            record[sample_label(samples[sample_id])] = values.get((fungus, sample_id), 0)
+        matrix.append(record)
+    return matrix
 
 
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -113,8 +144,7 @@ tab1, tab2, tab3, tab4 = st.tabs(
 with tab1:
     st.markdown('<p class="section-header">Upload PRO-LAB Certificate</p>', unsafe_allow_html=True)
     st.write(
-        "Upload the laboratory report first. MTAR will extract the supported lab data, "
-        "create the initial job record, and generate a draft report automatically."
+        "Upload the laboratory report first. MTAR imports supported lab data and creates an initial review-required draft."
     )
 
     lab_pdf = st.file_uploader(
@@ -133,6 +163,7 @@ with tab1:
                 st.session_state.parsed_lab = parsed
                 st.session_state.lab_pdf_bytes = pdf_bytes
                 st.session_state.lab_pdf_hash = pdf_hash
+                st.session_state.final_docx = None
 
                 if parsed.get("samples"):
                     build_draft_job_from_prolab(
@@ -140,16 +171,16 @@ with tab1:
                         parsed,
                         supported_molds=MOLD_DESCRIPTIONS.keys(),
                     )
-                    build_draft()
+                    st.session_state.automatic_draft = build_report_bytes()
                 else:
-                    st.session_state.draft_docx = None
+                    st.session_state.automatic_draft = None
 
         parsed = st.session_state.get("parsed_lab") or {}
         metadata = parsed.get("metadata", {})
 
         if parsed.get("samples"):
             st.markdown(
-                '<div class="success-note"><b>Draft created.</b> Lab data was imported and a review-required Mold Assessment Report was generated.</div>',
+                '<div class="success-note"><b>Lab imported.</b> Samples are now independent from inspection areas. Create the inspection areas and assign each sample in the Review tab.</div>',
                 unsafe_allow_html=True,
             )
             c1, c2, c3 = st.columns(3)
@@ -160,18 +191,17 @@ with tab1:
             if metadata.get("test_location"):
                 st.write(f"**Property from lab:** {metadata['test_location']}")
 
-            if st.session_state.draft_docx:
+            if st.session_state.get("automatic_draft"):
                 safe_name = (job.get("client_name") or "Client").replace(" ", "_")
                 st.download_button(
-                    "Download Automatic Draft DOCX",
-                    data=st.session_state.draft_docx,
-                    file_name=f"{safe_name}_Mold_Assessment_DRAFT.docx",
+                    "Download Initial Review Draft",
+                    data=st.session_state.automatic_draft,
+                    file_name=f"{safe_name}_Mold_Assessment_INITIAL_DRAFT.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    type="primary",
                 )
 
             st.info(
-                "Next: open **2. Review Report**. Anything the lab report cannot support is intentionally left for you to review."
+                "Next: open **2. Review Report**. The current draft there is regenerated from your latest edits."
             )
         else:
             st.error("I could not find a structured PRO-LAB result table in this PDF.")
@@ -181,7 +211,7 @@ with tab1:
 with tab2:
     st.markdown('<p class="section-header">Consultant Review</p>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="review-note"><b>Review required:</b> lab data may be prefilled, but inspection observations, moisture findings, affected-area names, and the professional conclusion remain your decision.</div>',
+        '<div class="review-note"><b>Review required:</b> inspection areas are separate from lab samples. Create the actual areas, assign each sample, enter RH, and select the professional findings.</div>',
         unsafe_allow_html=True,
     )
 
@@ -191,46 +221,72 @@ with tab2:
         st.markdown("### Client & Property")
         c1, c2 = st.columns(2)
         with c1:
-            job["client_name"] = st.text_input("Client Name", value=job.get("client_name", ""))
-            job["address"] = st.text_input("Property Address", value=job.get("address", ""))
-            job["city"] = st.text_input("City", value=job.get("city", ""))
+            job["client_name"] = st.text_input(
+                "Client Name *",
+                value=job.get("client_name", ""),
+                key="review_client_name",
+            )
+            job["address"] = st.text_input(
+                "Property Address *",
+                value=job.get("address", ""),
+                key="review_address",
+            )
+            job["city"] = st.text_input(
+                "City *",
+                value=job.get("city", ""),
+                key="review_city",
+            )
         with c2:
-            job["state"] = st.text_input("State", value=job.get("state", "TX"))
-            job["zip"] = st.text_input("ZIP", value=job.get("zip", ""))
-            job["phone"] = st.text_input("Phone", value=job.get("phone", ""))
-            job["email"] = st.text_input("Email", value=job.get("email", ""))
+            job["state"] = st.text_input(
+                "State",
+                value=job.get("state", "TX"),
+                key="review_state",
+            )
+            job["zip"] = st.text_input(
+                "ZIP *",
+                value=job.get("zip", ""),
+                key="review_zip",
+            )
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         with c1:
             job["inspection_date"] = st.date_input(
-                "Assessment Date",
+                "Assessment Date *",
                 value=job["inspection_date"],
+                key="review_inspection_date",
             )
         with c2:
             job["report_date"] = st.date_input(
-                "Report Date",
+                "Report Date *",
                 value=job["report_date"],
+                key="review_report_date",
             )
         with c3:
-            humidity_unknown = job.get("humidity") is None
-            known_humidity = st.checkbox(
-                "RH measured",
-                value=not humidity_unknown,
-                key="rh_measured",
-            )
-        with c4:
-            if known_humidity:
-                default_humidity = 50 if job.get("humidity") is None else int(job["humidity"])
-                job["humidity"] = st.number_input(
-                    "Indoor RH (%)",
-                    min_value=0,
-                    max_value=100,
-                    value=default_humidity,
-                )
-            else:
+            humidity_text = st.text_input(
+                "Indoor RH (%) *",
+                value="" if job.get("humidity") is None else str(job["humidity"]),
+                placeholder="Required",
+                key="review_humidity",
+            ).strip()
+            if not humidity_text:
                 job["humidity"] = None
+            else:
+                try:
+                    humidity_value = float(humidity_text)
+                    if 0 <= humidity_value <= 100:
+                        job["humidity"] = humidity_value
+                    else:
+                        job["humidity"] = None
+                        st.error("Indoor RH must be between 0 and 100.")
+                except ValueError:
+                    job["humidity"] = None
+                    st.error("Indoor RH must be a number.")
 
         st.markdown("### Inspection Areas")
+        st.caption(
+            "Areas are inspection entities. They are not created from lab sample names. Add the actual rooms/areas you inspected."
+        )
+
         finding_options = [
             "Needs consultant review",
             "Active mold growth confirmed",
@@ -239,13 +295,12 @@ with tab2:
             "No mold detected",
         ]
 
-        for i, area in enumerate(job.get("areas", []), 1):
-            with st.expander(area.get("name") or f"Area {i}", expanded=True):
+        for index, area in enumerate(list(job.get("areas", [])), 1):
+            with st.expander(area.get("name") or f"Inspection Area {index}", expanded=True):
                 area["name"] = st.text_input(
-                    "Area Name",
+                    "Area Name *",
                     value=area.get("name", ""),
-                    key=f"review_area_name_{area['id']}",
-                    help="Generic lab locations such as 'INDOORS' are intentionally converted to an Area of Concern placeholder for you to rename.",
+                    key=f"area_name_{area['id']}",
                 )
                 current_finding = area.get("finding", "Needs consultant review")
                 if current_finding not in finding_options:
@@ -254,61 +309,180 @@ with tab2:
                     "Consultant Finding",
                     finding_options,
                     index=finding_options.index(current_finding),
-                    key=f"review_area_finding_{area['id']}",
+                    key=f"area_finding_{area['id']}",
                 )
                 area["description"] = st.text_area(
                     "Visual Observations",
                     value=area.get("description", ""),
-                    key=f"review_area_desc_{area['id']}",
-                    placeholder="Enter what you observed during the inspection.",
+                    key=f"area_description_{area['id']}",
+                    placeholder="Enter the visual inspection observations for this area.",
                 )
                 area["moisture_notes"] = st.text_area(
                     "Moisture Assessment",
                     value=area.get("moisture_notes", ""),
-                    key=f"review_area_moisture_{area['id']}",
-                    placeholder="Enter measured moisture findings and locations.",
+                    key=f"area_moisture_{area['id']}",
+                    placeholder="Enter moisture readings/findings for this area.",
                 )
 
-        st.markdown("### Imported Air Results")
+                if st.button(
+                    "Remove Inspection Area",
+                    key=f"remove_area_{area['id']}",
+                ):
+                    removed_id = area["id"]
+                    job["areas"] = [a for a in job["areas"] if a["id"] != removed_id]
+                    for sample in job.get("samples", []):
+                        if sample.get("area_id") == removed_id:
+                            sample["area_id"] = None
+                    st.rerun()
+
+        if st.button("+ Add Inspection Area", type="secondary"):
+            job["areas"].append(new_area(""))
+            st.rerun()
+
+        st.markdown("### Samples & Area Assignment")
         st.caption(
-            "These rows came from the PRO-LAB result table. PRO-LAB's original sample-level determination is preserved in Lab Details."
+            "Sample names come from the PRO-LAB report when available. Assign each indoor/surface sample to an inspection area manually."
         )
 
-        air_rows = job.get("air_lab_rows", [])
-        for row in air_rows:
-            sample = next(
-                (s for s in job.get("samples", []) if s.get("id") == row.get("sample_id")),
-                {},
+        area_map = area_option_map()
+        area_labels = list(area_map.keys())
+        area_id_to_label = {value: label for label, value in area_map.items()}
+
+        for index, sample in enumerate(job.get("samples", []), 1):
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([2.0, 1.1, 2.0])
+                with c1:
+                    if sample.get("outdoor_control"):
+                        sample["name"] = st.text_input(
+                            "Sample Name",
+                            value=sample_label(sample),
+                            disabled=True,
+                            key=f"sample_name_{sample['id']}",
+                        )
+                    else:
+                        sample["name"] = st.text_input(
+                            "Sample Name",
+                            value=sample_label(sample),
+                            key=f"sample_name_{sample['id']}",
+                        )
+                    if sample.get("lab_coc_line"):
+                        st.caption(f"COC / Line: {sample['lab_coc_line']}")
+                with c2:
+                    st.text_input(
+                        "Sample Type",
+                        value=sample.get("type", ""),
+                        disabled=True,
+                        key=f"sample_type_{sample['id']}",
+                    )
+                with c3:
+                    if sample.get("outdoor_control"):
+                        st.text_input(
+                            "Assigned Area",
+                            value="Outdoor Control",
+                            disabled=True,
+                            key=f"sample_area_{sample['id']}",
+                        )
+                    else:
+                        current_label = area_id_to_label.get(sample.get("area_id"), "Unassigned")
+                        selected = st.selectbox(
+                            "Assign to Inspection Area *",
+                            area_labels,
+                            index=area_labels.index(current_label)
+                            if current_label in area_labels
+                            else 0,
+                            key=f"sample_area_{sample['id']}",
+                        )
+                        sample["area_id"] = area_map[selected]
+
+        if job.get("air_lab_rows"):
+            st.markdown("### Imported Air Results")
+            st.caption("Species are shown side by side by sample for easier comparison.")
+            st.dataframe(
+                air_results_matrix(),
+                hide_index=True,
+                use_container_width=True,
             )
-            c1, c2, c3, c4 = st.columns([1.8, 2.0, 1.0, 1.3])
-            c1.text_input(
-                "Sample",
-                value=sample_label(sample),
-                disabled=True,
-                key=f"review_sample_{row['id']}",
-            )
-            c2.text_input(
-                "Fungal Type",
-                value=row.get("fungal_type", ""),
-                disabled=True,
-                key=f"review_fungus_{row['id']}",
-            )
-            row["spore_count"] = st.number_input(
-                "Spores/m³",
-                min_value=0,
-                value=int(row.get("spore_count", 0)),
-                key=f"review_spores_{row['id']}",
-            )
-            int_options = ["Baseline (Reference)", "ELEVATED", "Not Elevated"]
-            current_int = row.get("interpretation", "Not Elevated")
-            if current_int not in int_options:
-                current_int = "Not Elevated"
-            row["interpretation"] = st.selectbox(
-                "Consultant Comparison",
-                int_options,
-                index=int_options.index(current_int),
-                key=f"review_interp_{row['id']}",
-            )
+
+            air_sample_map = {s["id"]: s for s in job.get("samples", [])}
+            for sample_id in dict.fromkeys(
+                row.get("sample_id") for row in job.get("air_lab_rows", [])
+            ):
+                sample = air_sample_map.get(sample_id)
+                if not sample:
+                    continue
+                with st.expander(f"Review air comparison: {sample_label(sample)}", expanded=False):
+                    for row in [
+                        r for r in job.get("air_lab_rows", [])
+                        if r.get("sample_id") == sample_id
+                    ]:
+                        c1, c2, c3 = st.columns([2.0, 1.0, 1.3])
+                        c1.text_input(
+                            "Fungal Type",
+                            value=row.get("fungal_type", ""),
+                            disabled=True,
+                            key=f"fungus_{row['id']}",
+                        )
+                        row["spore_count"] = st.number_input(
+                            "Spores/m³",
+                            min_value=0,
+                            value=int(row.get("spore_count", 0)),
+                            key=f"spores_{row['id']}",
+                        )
+                        options = ["Baseline (Reference)", "ELEVATED", "Not Elevated"]
+                        current = row.get("interpretation", "Not Elevated")
+                        if current not in options:
+                            current = "Not Elevated"
+                        row["interpretation"] = st.selectbox(
+                            "Consultant Comparison",
+                            options,
+                            index=options.index(current),
+                            key=f"interpretation_{row['id']}",
+                        )
+
+        surface_rows = job.get("surface_lab_rows", [])
+        if surface_rows:
+            st.markdown("### Imported Surface Sample Results")
+            sample_map = {s["id"]: s for s in job.get("samples", [])}
+            for row in surface_rows:
+                sample = sample_map.get(row.get("sample_id"), {})
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([2.0, 1.4, 2.0])
+                    c1.text_input(
+                        "Surface Sample",
+                        value=sample_label(sample),
+                        disabled=True,
+                        key=f"surface_name_{row['id']}",
+                    )
+                    surface_options = [
+                        "Normal",
+                        "UNUSUAL / Mold Present",
+                        "UNUSUAL / Mold Present (Stachybotrys)",
+                    ]
+                    current_result = row.get("result", "Normal")
+                    if current_result not in surface_options:
+                        current_result = "Normal"
+                    row["result"] = c2.selectbox(
+                        "Consultant Result",
+                        surface_options,
+                        index=surface_options.index(current_result),
+                        key=f"surface_result_{row['id']}",
+                    )
+                    determination = sample.get("lab_determination") or "—"
+                    c3.text_input(
+                        "PRO-LAB Determination",
+                        value=determination,
+                        disabled=True,
+                        key=f"surface_det_{row['id']}",
+                    )
+                    lab_fungi = sample.get("lab_fungi", {})
+                    if lab_fungi:
+                        st.caption(
+                            "Lab organisms: "
+                            + ", ".join(
+                                f"{name}: {value}"
+                                for name, value in lab_fungi.items()
+                            )
+                        )
 
         st.markdown("### Overall Professional Conclusion")
         outcome_options = [
@@ -320,37 +494,38 @@ with tab2:
         if current_outcome not in outcome_options:
             current_outcome = "Pending consultant review"
         job["report_outcome"] = st.selectbox(
-            "Overall Report Outcome",
+            "Overall Report Outcome *",
             outcome_options,
             index=outcome_options.index(current_outcome),
+            key="review_outcome",
         )
+
+        # Always regenerate the review draft from the current widget values so
+        # the DOCX cannot lag behind the selected conclusion or observations.
+        current_draft = build_report_bytes()
 
         st.markdown("### Draft / Final Report")
         c1, c2 = st.columns(2)
+        safe_name = (job.get("client_name") or "Client").replace(" ", "_")
 
         with c1:
-            if st.button("Refresh Draft Report", use_container_width=True):
-                build_draft()
-                st.success("Draft refreshed with your current review edits.")
-
-            if st.session_state.get("draft_docx"):
-                safe_name = (job.get("client_name") or "Client").replace(" ", "_")
-                st.download_button(
-                    "Download Current Draft",
-                    data=st.session_state.draft_docx,
-                    file_name=f"{safe_name}_Mold_Assessment_DRAFT.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                )
+            st.download_button(
+                "Download Current Draft",
+                data=current_draft,
+                file_name=f"{safe_name}_Mold_Assessment_DRAFT.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
 
         issues = final_review_issues()
         with c2:
             if issues:
-                st.warning("Before finalizing: " + ", ".join(issues))
+                st.warning("Before finalizing: " + ", ".join(dict.fromkeys(issues)))
 
             reviewed = st.checkbox(
-                "I reviewed the imported lab data, inspection findings, and professional conclusion.",
+                "I reviewed the lab data, sample-to-area assignments, inspection findings, and professional conclusion.",
                 value=False,
+                key="final_review_checkbox",
             )
             if st.button(
                 "Approve & Generate Final Report",
@@ -362,7 +537,6 @@ with tab2:
                 st.success("Final report generated from the reviewed job data.")
 
             if st.session_state.get("final_docx"):
-                safe_name = (job.get("client_name") or "Client").replace(" ", "_")
                 st.download_button(
                     "Download FINAL DOCX",
                     data=st.session_state.final_docx,
@@ -375,7 +549,7 @@ with tab2:
 with tab3:
     st.markdown('<p class="section-header">Photos</p>', unsafe_allow_html=True)
     st.caption(
-        "RG-2 keeps one primary photo per area. Multi-photo categorization and automatic grids are planned for RG-3."
+        "The property photo is placed on page 1. Area photos are placed in their assigned inspection-area sections."
     )
 
     st.file_uploader(
@@ -391,12 +565,10 @@ with tab3:
             key=f"photo_{area['id']}",
         )
 
-    if st.button("Refresh Draft With Photos"):
-        if st.session_state.get("parsed_lab"):
-            build_draft()
-            st.success("Draft refreshed with the currently uploaded photos.")
-        else:
-            st.warning("Upload a lab report first.")
+    if st.session_state.get("parsed_lab"):
+        st.success(
+            "Photos are included automatically the next time you download the Current Draft or generate the Final Report."
+        )
 
 with tab4:
     st.markdown('<p class="section-header">Parsed PRO-LAB Details</p>', unsafe_allow_html=True)
@@ -425,7 +597,7 @@ with tab4:
                 if lab_sample.get("fungi"):
                     st.dataframe(
                         [
-                            {"Fungal Type": fungus, "Spores/m³": count}
+                            {"Fungal Type": fungus, "Result": count}
                             for fungus, count in lab_sample["fungi"].items()
                         ],
                         hide_index=True,
@@ -436,15 +608,17 @@ with tab4:
 
 with st.sidebar:
     st.markdown("## MTAR V2")
-    st.write("Current sprint: **RG-2 — upload-to-draft workflow**")
+    st.write("Current branch work: **RG-2 review fixes**")
     st.markdown(
         """
 **Workflow**
 1. Upload PRO-LAB PDF
-2. Automatic draft is generated
-3. Review inspection details
-4. Add photos
-5. Approve and generate final DOCX
+2. Create inspection areas
+3. Assign samples to areas
+4. Enter required RH and findings
+5. Add photos
+6. Review current draft
+7. Approve final DOCX
 """
     )
     if st.button("Start New Report", use_container_width=True):

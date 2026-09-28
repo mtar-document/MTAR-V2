@@ -2,70 +2,47 @@
 
 V2 workspace for Mold Testing and Removal report automation.
 
-## Current workflow — RG-2
+## RG-2 review-fixes branch
 
-The report workflow is now designed around the PRO-LAB certificate:
+This branch refines the report review workflow based on real testing.
+
+### Updated workflow
 
 1. Upload the PRO-LAB Certificate of Mold Analysis.
-2. MTAR parses supported data from the structured result table.
-3. MTAR automatically creates a **review-required draft DOCX**.
-4. The consultant reviews and completes information the lab report cannot provide.
-5. Photos can be added.
-6. The consultant explicitly approves the findings and generates the final DOCX.
+2. MTAR imports supported lab data.
+3. Inspection Areas are created manually and remain separate from lab samples.
+4. Each indoor or surface sample is manually assigned to an Inspection Area.
+5. Indoor RH is blank and required.
+6. Visual observations, moisture findings, area findings, and the final professional conclusion are reviewed in Streamlit.
+7. Property and area photos are added.
+8. The Current Draft is regenerated from the latest review values.
+9. The final DOCX is generated only after validation and consultant approval.
 
-### Automatically imported from PRO-LAB when available
+### Current fixes
 
-- project/client name
-- property/test location
-- PRO-LAB report number
-- report date
-- sample collection date
-- COC / line number
-- sample location
-- sample type
-- volume
-- serial number
-- PRO-LAB determination
-- fungal types
-- spores/m³
-- total spores
+- Lab sample names are visible in Review Report.
+- Samples and Inspection Areas are separate entities.
+- Inspection Areas can be added, renamed, edited, and removed.
+- Samples can be assigned to areas manually.
+- Surface samples have a review section when present.
+- Client phone/email fields were removed from the report-review UI.
+- Indoor RH is required and starts blank.
+- Draft generation uses the current selected report outcome, preventing stale conclusion text.
+- Visual Observation and Moisture Assessment edits flow into the current draft.
+- Property photos use fresh in-memory image streams and are included in regenerated drafts/final reports.
+- Air results are shown side by side by sample in Streamlit and in the DOCX.
+- The Surface Sample Results section is omitted when no surface samples exist.
+- The report introduction only mentions sample types actually present.
 
-### Intentionally left for consultant review
+### Surface-sample note
 
-The application does not invent inspection facts that are absent from the laboratory certificate. These remain review fields:
-
-- exact affected-area name when the lab only says "INDOORS"
-- visual observations
-- moisture readings
-- inspection-area finding
-- indoor RH when not supplied
-- final professional conclusion
-- remediation/no-remediation decision
-
-A new job defaults to **Pending consultant review**. A draft report shows **DRAFT - CONSULTANT REVIEW REQUIRED** and withholds final recommendations until the licensed consultant completes review.
-
-## Files
-
-- `app.py` — Streamlit upload → draft → review → final workflow
-- `models.py` — job/area/sample data model and final validation
-- `prolab_parser.py` — structured PRO-LAB parser and automatic draft-job builder
-- `report_builder.py` — DOCX generator with draft/final behavior
-- `assets/` — MTAR logo and signature assets
+Surface sample entities, assignment, PRO-LAB determination review, and report output are implemented. Detailed organism extraction for every possible PRO-LAB surface-report layout still needs validation against a real surface/swab certificate before it should be considered complete.
 
 ## Run locally
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-On Windows, if `streamlit` is not on PATH:
-
 ```powershell
+git checkout rg-2-review-fixes
+git pull
 py -m pip install -r requirements.txt
 py -m streamlit run app.py
 ```
-
-## Next sprint
-
-RG-3 will focus on multi-photo upload, photo categories, and automatic photo layout in the generated report.

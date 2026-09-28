@@ -94,6 +94,25 @@ def _sample_map(job: dict) -> dict[str, dict]:
     return {s["id"]: s for s in job.get("samples", [])}
 
 
+def _sample_display_name(sample: dict) -> str:
+    name = (sample.get("name") or "").strip()
+    if name:
+        return name
+    if sample.get("outdoor_control"):
+        return "Outdoor Control"
+    return sample.get("lab_location") or "Unnamed Sample"
+
+
+def _assigned_area_name(sample: dict, areas: list[dict]) -> str:
+    if sample.get("outdoor_control"):
+        return "Outdoor Control"
+    area_id = sample.get("area_id")
+    for area in areas:
+        if area.get("id") == area_id:
+            return area.get("name") or "Unnamed Area"
+    return "Unassigned"
+
+
 def _lab_rows_for_report(job: dict) -> list[dict]:
     samples = _sample_map(job)
     rows = []
@@ -203,7 +222,12 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
     run.font.size = Pt(15)
     for index, sample in enumerate(job.get("samples", []), 1):
         prefix = "Exterior control sample" if sample.get("outdoor_control") else f"Sample {index - 1}"
-        info4.add_run(f"{prefix}: {sample['type']} taken at {sample_location(sample, job['areas'])}\n")
+        sample_name = _sample_display_name(sample)
+        area_name = _assigned_area_name(sample, job.get("areas", []))
+        if sample.get("outdoor_control"):
+            info4.add_run(f"{prefix}: {sample_name} ({sample['type']})\n")
+        else:
+            info4.add_run(f"{prefix}: {sample_name} ({sample['type']}) — assigned to {area_name}\n")
 
     doc.add_page_break()
     letter_header = make_tight(doc.add_paragraph())
@@ -221,12 +245,21 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
         f"{job['address']}, {job['city']}, {job['state']} {job['zip']}. The purpose of this assessment was to "
         "evaluate the indoor air quality, identify potential sources of fungal growth, and provide recommendations for remediation."
     )
+    has_air_samples = any(s.get("type") == "Air Sample" for s in job.get("samples", []))
+    has_surface_samples = bool(job.get("surface_lab_rows"))
+    if has_air_samples and has_surface_samples:
+        sampling_text = "bioaerosol (air) and surface samples"
+    elif has_surface_samples:
+        sampling_text = "surface samples"
+    else:
+        sampling_text = "bioaerosol (air) samples"
+
     doc.add_paragraph(
         "The assessment included a visual inspection, moisture mapping using a Protimeter Moisture Meter, "
-        "and the collection of bioaerosol (air) and surface (swab) samples. Samples were collected from the "
-        "interior of the property and the exterior for control purposes."
+        f"and the collection of {sampling_text}. Samples were collected from the assessed areas"
+        + (" and the exterior for control purposes." if has_air_samples else ".")
     )
-    doc.add_paragraph("The samples were sent to PRO-LAB, an accredited laboratory, for viable mold/fungi analysis.")
+    doc.add_paragraph("The samples were sent to PRO-LAB, an accredited laboratory, for mold/fungi analysis.")
 
     report_outcome = job.get("report_outcome", "Pending consultant review")
     remediation_required = report_outcome == "Mold remediation required"
@@ -354,55 +387,99 @@ def create_report(job: dict, photos: dict, lab_pdf_bytes: bytes | None = None) -
         "The following summarizes the findings compared to the outdoor control sample."
     ))
 
-    air_title = make_tight(doc.add_paragraph())
-    r = air_title.add_run("Air Sample Comparison (Bioaerosol)")
-    r.font.name = "Bebas Neue"
-    r.bold = True
-    r.font.color.rgb = RGBColor(24, 64, 88)
-    r.font.size = Pt(17)
-    air_table = doc.add_table(rows=1, cols=4)
-    air_table.style = "Table Grid"
-    headers = ["Location", "Fungal Type", "Spores/m³", "Interpretation"]
-    for i, text in enumerate(headers):
-        cell = air_table.rows[0].cells[i]
-        cell.text = text
-        cell.paragraphs[0].runs[0].bold = True
-        set_cell_shading(cell, "D5E8F0")
-    for sample in _lab_rows_for_report(job):
-        row = air_table.add_row()
-        row.cells[0].text = sample["location"]
-        row.cells[1].text = sample["fungal_type"]
-        row.cells[2].text = str(sample["spore_count"])
-        row.cells[3].text = sample["interpretation"]
-        if sample["interpretation"].upper() == "ELEVATED":
-            set_cell_shading(row.cells[2], "FFCCCC")
-            set_cell_shading(row.cells[3], "FFCCCC")
-            row.cells[3].paragraphs[0].runs[0].font.color.rgb = RGBColor(220, 53, 69)
-            row.cells[3].paragraphs[0].runs[0].bold = True
+    air_rows = job.get("air_lab_rows", [])
+    air_samples = [
+        sample for sample in job.get("samples", [])
+        if sample.get("type") == "Air Sample"
+    ]
+    if air_rows and air_samples:
+        air_title = make_tight(doc.add_paragraph())
+        r = air_title.add_run("Air Sample Comparison (Bioaerosol)")
+        r.font.name = "Bebas Neue"
+        r.bold = True
+        r.font.color.rgb = RGBColor(24, 64, 88)
+        r.font.size = Pt(17)
 
-    doc.add_paragraph()
-    surface_title = make_tight(doc.add_paragraph())
-    r = surface_title.add_run("Surface Sample Results (Swab)")
-    r.font.name = "Bebas Neue"
-    r.bold = True
-    r.font.color.rgb = RGBColor(24, 64, 88)
-    r.font.size = Pt(17)
-    surface_table = doc.add_table(rows=1, cols=3)
-    surface_table.style = "Table Grid"
-    for i, text in enumerate(["Location", "Sample Type", "Result"]):
-        cell = surface_table.rows[0].cells[i]
-        cell.text = text
-        cell.paragraphs[0].runs[0].bold = True
-        set_cell_shading(cell, "D5E8F0")
-    for sample in _surface_rows_for_report(job):
-        row = surface_table.add_row()
-        row.cells[0].text = sample["location"]
-        row.cells[1].text = "Swab"
-        row.cells[2].text = sample["result"]
-        if "UNUSUAL" in sample["result"].upper() or "MOLD PRESENT" in sample["result"].upper():
-            set_cell_shading(row.cells[2], "FFCCCC")
-            row.cells[2].paragraphs[0].runs[0].font.color.rgb = RGBColor(220, 53, 69)
-            row.cells[2].paragraphs[0].runs[0].bold = True
+        # PRO-LAB-style comparison: fungal types down the left, samples side by side.
+        air_table = doc.add_table(rows=1, cols=1 + len(air_samples))
+        air_table.style = "Table Grid"
+        header = air_table.rows[0].cells
+        header[0].text = "Fungal Type"
+        header[0].paragraphs[0].runs[0].bold = True
+        set_cell_shading(header[0], "D5E8F0")
+
+        for index, sample in enumerate(air_samples, 1):
+            sample_name = _sample_display_name(sample)
+            area_name = _assigned_area_name(sample, job.get("areas", []))
+            header_text = sample_name
+            if not sample.get("outdoor_control"):
+                header_text += f"\n{area_name}"
+            header[index].text = header_text
+            header[index].paragraphs[0].runs[0].bold = True
+            set_cell_shading(header[index], "D5E8F0")
+
+        species = []
+        lookup = {}
+        for lab_row in air_rows:
+            fungus = lab_row.get("fungal_type", "")
+            if fungus and fungus not in species:
+                species.append(fungus)
+            lookup[(fungus, lab_row.get("sample_id"))] = lab_row
+
+        for fungus in species:
+            row = air_table.add_row()
+            row.cells[0].text = fungus
+            for index, sample in enumerate(air_samples, 1):
+                lab_row = lookup.get((fungus, sample.get("id")))
+                if not lab_row:
+                    row.cells[index].text = "—"
+                    continue
+                count = lab_row.get("spore_count", 0)
+                interpretation = lab_row.get("interpretation", "")
+                row.cells[index].text = f"{count}\n{interpretation}"
+                if interpretation.upper() == "ELEVATED":
+                    set_cell_shading(row.cells[index], "FFCCCC")
+                    for run in row.cells[index].paragraphs[0].runs:
+                        run.font.color.rgb = RGBColor(220, 53, 69)
+                        run.bold = True
+
+        if any(sample.get("lab_total_spores") is not None for sample in air_samples):
+            total = air_table.add_row()
+            total.cells[0].text = "TOTAL SPORES"
+            total.cells[0].paragraphs[0].runs[0].bold = True
+            for index, sample in enumerate(air_samples, 1):
+                value = sample.get("lab_total_spores")
+                total.cells[index].text = "—" if value is None else str(value)
+                total.cells[index].paragraphs[0].runs[0].bold = True
+
+    surface_rows = _surface_rows_for_report(job)
+    if surface_rows:
+        doc.add_paragraph()
+        surface_title = make_tight(doc.add_paragraph())
+        r = surface_title.add_run("Surface Sample Results")
+        r.font.name = "Bebas Neue"
+        r.bold = True
+        r.font.color.rgb = RGBColor(24, 64, 88)
+        r.font.size = Pt(17)
+        surface_table = doc.add_table(rows=1, cols=3)
+        surface_table.style = "Table Grid"
+        for i, text in enumerate(["Sample", "Assigned Area", "Result"]):
+            cell = surface_table.rows[0].cells[i]
+            cell.text = text
+            cell.paragraphs[0].runs[0].bold = True
+            set_cell_shading(cell, "D5E8F0")
+
+        samples = _sample_map(job)
+        for source_row in job.get("surface_lab_rows", []):
+            sample = samples.get(source_row.get("sample_id"), {})
+            row = surface_table.add_row()
+            row.cells[0].text = _sample_display_name(sample)
+            row.cells[1].text = _assigned_area_name(sample, job.get("areas", []))
+            row.cells[2].text = source_row.get("result", "")
+            if "UNUSUAL" in row.cells[2].text.upper() or "MOLD PRESENT" in row.cells[2].text.upper():
+                set_cell_shading(row.cells[2], "FFCCCC")
+                row.cells[2].paragraphs[0].runs[0].font.color.rgb = RGBColor(220, 53, 69)
+                row.cells[2].paragraphs[0].runs[0].bold = True
 
     doc.add_paragraph()
     mold_title = make_tight(doc.add_paragraph())

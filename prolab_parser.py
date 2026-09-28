@@ -543,11 +543,11 @@ def build_draft_job_from_prolab(
 ) -> dict[str, str]:
     """Build a review-ready V2 job directly from a parsed PRO-LAB report.
 
-    This intentionally fills only facts supported by the lab report. Visual
-    observations, moisture findings, area findings, and the overall consultant
-    conclusion remain marked for review.
+    Samples are created as independent entities. Indoor/surface samples are
+    intentionally left unassigned to inspection areas so the consultant can
+    create the actual inspection areas and map samples manually.
     """
-    from models import new_area, new_sample
+    from models import new_sample
 
     metadata = parsed.get("metadata", {})
     project_name = _norm(metadata.get("project_name", ""))
@@ -572,16 +572,16 @@ def build_draft_job_from_prolab(
     if sample_dates:
         job["inspection_date"] = min(sample_dates)
 
-    areas: list[dict] = []
     samples: list[dict] = []
     mapping: dict[str, str] = {}
-    area_by_location: dict[str, str] = {}
-    generic_area_counter = 0
+    indoor_counter = 0
+    surface_counter = 0
 
     for lab in parsed.get("samples", []):
-        location = _norm(lab.get("location", ""))
+        lab_location = _norm(lab.get("location", ""))
         determination = _upper(lab.get("determination", ""))
-        is_control = "OUTDOOR" in _upper(location) or determination == "CONTROL"
+        is_control = "OUTDOOR" in _upper(lab_location) or determination == "CONTROL"
+        sample_type = "Air Sample" if lab.get("is_air") else "Surface Sample"
 
         if is_control:
             sample = new_sample(
@@ -589,65 +589,46 @@ def build_draft_job_from_prolab(
                 location="Outdoor Control",
                 outdoor_control=True,
             )
-            samples.append(sample)
-            mapping[lab["key"]] = sample["id"]
-            continue
-
-        sample_type = "Air Sample" if lab.get("is_air") else "Swab"
-        loc_key = _upper(location)
-        is_generic = loc_key in {
-            "",
-            "INDOOR",
-            "INDOORS",
-            "INTERIOR",
-            "INTERIOR SAMPLE",
-            "INDOOR SAMPLE",
-            "AIR SAMPLE",
-            "SAMPLE",
-        }
-
-        if is_generic:
-            generic_area_counter += 1
-            area = new_area(_review_area_name(location, generic_area_counter))
-            areas.append(area)
-            area_id = area["id"]
+            sample["name"] = lab_location or "Outdoor Control"
         else:
-            area_id = area_by_location.get(loc_key)
-            if not area_id:
-                area = new_area(_review_area_name(location, len(areas) + 1))
-                areas.append(area)
-                area_id = area["id"]
-                area_by_location[loc_key] = area_id
+            if lab.get("is_air"):
+                indoor_counter += 1
+                fallback_name = f"Indoor Air Sample {indoor_counter}"
+            else:
+                surface_counter += 1
+                fallback_name = f"Surface Sample {surface_counter}"
 
-        sample = new_sample(
-            sample_type=sample_type,
-            location="",
-            area_id=area_id,
-        )
-        sample["lab_location"] = location
+            sample = new_sample(
+                sample_type=sample_type,
+                location="",
+                area_id=None,
+            )
+            sample["name"] = lab_location or fallback_name
+
+        sample["lab_location"] = lab_location
         samples.append(sample)
         mapping[lab["key"]] = sample["id"]
 
     if not any(s.get("outdoor_control") for s in samples):
-        samples.insert(
-            0,
-            new_sample(
-                sample_type="Air Sample",
-                location="Outdoor Control",
-                outdoor_control=True,
-            ),
+        outdoor = new_sample(
+            sample_type="Air Sample",
+            location="Outdoor Control",
+            outdoor_control=True,
         )
+        outdoor["name"] = "Outdoor Control"
+        samples.insert(0, outdoor)
 
-    if not areas:
-        areas = [new_area("Area of Concern 1")]
-
-    job["areas"] = areas
+    # Inspection areas are deliberately separate from lab samples. The
+    # consultant creates the actual areas and assigns samples in Streamlit.
+    job["areas"] = []
     job["samples"] = samples
     job["air_lab_rows"] = []
     job["surface_lab_rows"] = []
     job["mold_types"] = []
     job["report_outcome"] = "Pending consultant review"
+    job["humidity"] = None
     job["lab_metadata"] = dict(metadata)
 
     apply_prolab_results(job, parsed, mapping, supported_molds)
     return mapping
+
